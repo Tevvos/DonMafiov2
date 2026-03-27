@@ -28,7 +28,7 @@ public class PlayerHealth : NetworkBehaviour
     [SerializeField] private AudioClip deathSound;
 
     private Rigidbody2D[] allRB2D;
-    private Collider2D[] allCols;
+    private Collider2D[]  allCols;
 
     private static readonly int HASH_IsDead = Animator.StringToHash("IsDead");
     private static readonly int HASH_DeadTr = Animator.StringToHash("Dead");
@@ -68,6 +68,7 @@ public class PlayerHealth : NetworkBehaviour
     }
 
     // ======== DÉGÂTS (serveur) ========
+
     public void ServerApplyDamage(float amount, PlayerRef killerRef = default, string reason = "ServerApplyDamage")
     {
         if (!Object.HasStateAuthority || amount <= 0f || NetIsDead) return;
@@ -77,18 +78,15 @@ public class PlayerHealth : NetworkBehaviour
 
         RPC_UpdateHealthUI(CurrentHealth, maxHealth);
         RPC_OnHitFeedback();
-
-        // ✅ BLOOD FX POUR TOUT LE MONDE (compatible SpawnBloodEffect(Vector2))
         RPC_SpawnBloodFxForAll(-transform.right);
 
         if (CurrentHealth > 0f) return;
 
         NetIsDead = true;
 
+        // Rapport de kill via le hub de ranking
         if (killerRef != default && !killerRef.IsNone && (Object == null || killerRef != Object.InputAuthority))
-        {
             GameSceneRankingHub.ReportKill(killerRef, Object ? Object.InputAuthority : PlayerRef.None);
-        }
 
         RPC_PlayDeathAnim();
         ServerLockAndHandleRespawnOrFinal();
@@ -97,7 +95,8 @@ public class PlayerHealth : NetworkBehaviour
     }
 
     [Rpc(RpcSources.All, RpcTargets.StateAuthority)]
-    private void RPC_ApplyDamage(float amount, PlayerRef killerRef) => ServerApplyDamage(amount, killerRef, "RPC_ApplyDamage");
+    private void RPC_ApplyDamage(float amount, PlayerRef killerRef)
+        => ServerApplyDamage(amount, killerRef, "RPC_ApplyDamage");
 
     public void TakeDamage(float amount, NetworkObject attackerNO)
     {
@@ -110,7 +109,8 @@ public class PlayerHealth : NetworkBehaviour
         PlayerRef killerRef = default;
         if (attacker)
         {
-            NetworkObject no = attacker.GetComponent<NetworkObject>() ?? attacker.GetComponentInParent<NetworkObject>();
+            NetworkObject no = attacker.GetComponent<NetworkObject>()
+                            ?? attacker.GetComponentInParent<NetworkObject>();
             if (no) killerRef = no.InputAuthority;
         }
         RPC_ApplyDamage(amount, killerRef);
@@ -119,18 +119,18 @@ public class PlayerHealth : NetworkBehaviour
     public void TakeDamage(float amount) => RPC_ApplyDamage(amount, default);
 
     // ======== FEEDBACK / UI ========
+
     [Rpc(RpcSources.StateAuthority | RpcSources.InputAuthority, RpcTargets.InputAuthority)]
     private void RPC_OnHitFeedback()
     {
         if (audioSource && hitSound) audioSource.PlayOneShot(hitSound);
 
-        // (garde ton hit feedback local)
         playerWeapon?.SpawnBloodEffect(-transform.right);
 
         if (Object != null && Object.HasInputAuthority)
         {
             var camFollow = FindObjectOfType<CameraFollowFusion>();
-            if (camFollow != null) camFollow.KickCamera(0.9f);
+            if (camFollow) camFollow.KickCamera(0.9f);
 
             if (DamageOverlayUI.Instance != null)
                 DamageOverlayUI.Instance.Pulse(1f);
@@ -138,7 +138,8 @@ public class PlayerHealth : NetworkBehaviour
     }
 
     [Rpc(RpcSources.StateAuthority, RpcTargets.InputAuthority)]
-    private void RPC_UpdateHealthUI(float current, float max) => UpdateLocalHealthUI(current, max);
+    private void RPC_UpdateHealthUI(float current, float max)
+        => UpdateLocalHealthUI(current, max);
 
     private void UpdateLocalHealthUI(float current, float max)
     {
@@ -157,7 +158,7 @@ public class PlayerHealth : NetworkBehaviour
         if (playerMovement) playerMovement.enabled = false;
 
         foreach (var rb in allRB2D) if (rb) { rb.linearVelocity = Vector2.zero; rb.bodyType = RigidbodyType2D.Static; }
-        foreach (var c in allCols)  if (c)  c.enabled   = false;
+        foreach (var c in allCols)  if (c)  c.enabled = false;
 
         if (postProcessVolume) postProcessVolume.enabled = true;
         var cam = FindObjectOfType<CameraFollowFusion>(); if (cam) cam.SetZoom(true);
@@ -223,24 +224,43 @@ public class PlayerHealth : NetworkBehaviour
         }
         else
         {
-            if (!NetFinalDeathNotified)
-            {
-                NetFinalDeathNotified = true;
-                if (Object != null && Object.HasStateAuthority)
-                {
-                    Debug.Log($"[HP] FINAL DEATH -> NotifyFinalDeath({Object.InputAuthority})");
-                    GameRules_Victory_Fusion.NotifyFinalDeath(Object.InputAuthority);
-                }
-                else
-                {
-                    Debug.LogError("[HP] Final death MAIS pas StateAuthority -> pas de NotifyFinalDeath (vérifie autorité).");
-                }
-            }
-
-            if (playerMovement) playerMovement.enabled = false;
-            foreach (var rb in allRB2D) if (rb) rb.bodyType = RigidbodyType2D.Static;
-            if (playerWeapon) playerWeapon.enabled = false;
+            NotifyFinalDeath();
         }
+    }
+
+    /// <summary>
+    /// Notifie la mort définitive du joueur.
+    /// MODIFIÉ : passe d'abord par RoomManager (système multi-rooms),
+    /// avec fallback sur GameRules_Victory_Fusion pour compatibilité.
+    /// </summary>
+    private void NotifyFinalDeath()
+    {
+        if (NetFinalDeathNotified) return;
+        if (!Object || !Object.HasStateAuthority) return;
+
+        NetFinalDeathNotified = true;
+
+        PlayerRef deadPlayer = Object.InputAuthority;
+        Debug.Log($"[HP] FINAL DEATH -> {deadPlayer}");
+
+        // ── Priorité : RoomManager (nouveau système multi-rooms) ────────────
+        var roomManager = FindObjectOfType<RoomManager>();
+        if (roomManager != null)
+        {
+            roomManager.NotifyFinalDeath(deadPlayer);
+            Debug.Log($"[HP] FinalDeath routé vers RoomManager pour {deadPlayer}.");
+        }
+        else
+        {
+            // ── Fallback : ancienne logique singleton (mono-room) ──────────
+            Debug.LogWarning("[HP] RoomManager introuvable, fallback sur GameRules_Victory_Fusion.");
+            GameRules_Victory_Fusion.NotifyFinalDeath(deadPlayer);
+        }
+
+        // Désactive le joueur
+        if (playerMovement) playerMovement.enabled = false;
+        foreach (var rb in allRB2D) if (rb) rb.bodyType = RigidbodyType2D.Static;
+        if (playerWeapon) playerWeapon.enabled = false;
     }
 
     private void RespawnServer()
@@ -248,7 +268,7 @@ public class PlayerHealth : NetworkBehaviour
         if (!Object.HasStateAuthority) return;
 
         CurrentHealth = maxHealth;
-        NetIsDead = false;
+        NetIsDead     = false;
 
         foreach (var c in allCols)  if (c)  c.enabled = true;
         foreach (var rb in allRB2D) if (rb) { rb.bodyType = RigidbodyType2D.Dynamic; rb.linearVelocity = Vector2.zero; }
@@ -264,20 +284,19 @@ public class PlayerHealth : NetworkBehaviour
         Debug.Log($"[HP] RespawnServer -> {CurrentHealth}/{maxHealth} LivesLeft={NetRemainingLives}");
     }
 
-    private void SafeSetBool(int hash, bool v) { if (animator) animator.SetBool(hash, v); }
-    private void SafeSetTrigger(int hash) { if (animator) animator.SetTrigger(hash); }
+    private void SafeSetBool(int hash, bool v)    { if (animator) animator.SetBool(hash, v); }
+    private void SafeSetTrigger(int hash)         { if (animator) animator.SetTrigger(hash); }
 
-    public bool IsDead() => NetIsDead;
-    public float GetCurrentHealthValue() => CurrentHealth;
-    public int GetRemainingLivesValue() => NetRemainingLives;
+    public bool  IsDead()                 => NetIsDead;
+    public float GetCurrentHealthValue()  => CurrentHealth;
+    public int   GetRemainingLivesValue() => NetRemainingLives;
 
     // ======== Lobby reset ========
+
     public void ResetForLobby()
     {
-        if (Object != null && Object.HasStateAuthority)
-            DoResetForLobby_Server();
-        else
-            RPC_AskResetForLobby();
+        if (Object != null && Object.HasStateAuthority) DoResetForLobby_Server();
+        else RPC_AskResetForLobby();
     }
 
     [Rpc(RpcSources.All, RpcTargets.StateAuthority)]
@@ -310,21 +329,18 @@ public class PlayerHealth : NetworkBehaviour
     // --- BONUS CLASSE : MASTODONTE ---
     public void ApplyMaxHPBonus(int bonus)
     {
-        maxHealth += bonus;
+        maxHealth = maxHealth + bonus;
         CurrentHealth = Mathf.Clamp(CurrentHealth + bonus, 0, maxHealth);
         RPC_UpdateHealthUI(CurrentHealth, maxHealth);
         Debug.Log($"[HP] ApplyMaxHPBonus +{bonus} -> {CurrentHealth}/{maxHealth}");
     }
 
-    // ✅ RPC BLOOD FX (All) compatible SpawnBloodEffect(Vector2)
+    // ✅ RPC BLOOD FX (All)
     [Rpc(RpcSources.StateAuthority, RpcTargets.All)]
     private void RPC_SpawnBloodFxForAll(Vector2 dir)
     {
-        if (!playerWeapon)
-            playerWeapon = GetComponent<PlayerWeapon>();
-
+        if (!playerWeapon) playerWeapon = GetComponent<PlayerWeapon>();
         if (!playerWeapon) return;
-
         playerWeapon.SpawnBloodEffect(dir);
     }
 }
