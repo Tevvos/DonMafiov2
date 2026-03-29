@@ -27,8 +27,14 @@ public class PlayerHealth : NetworkBehaviour
     [SerializeField] private AudioClip hitSound;
     [SerializeField] private AudioClip deathSound;
 
+    // --- FIX SÉCURITÉ : damage max par coup (anti-triche) ---
+    private const float MAX_DAMAGE_PER_HIT = 200f;
+
     private Rigidbody2D[] allRB2D;
     private Collider2D[] allCols;
+
+    // FIX : flag pour éviter de re-planifier un respawn si déjà en cours
+    private bool _respawnScheduled = false;
 
     private static readonly int HASH_IsDead = Animator.StringToHash("IsDead");
     private static readonly int HASH_DeadTr = Animator.StringToHash("Dead");
@@ -55,6 +61,8 @@ public class PlayerHealth : NetworkBehaviour
             NetFinalDeathNotified = false;
         }
 
+        _respawnScheduled = false;
+
         SafeSetBool(HASH_IsDead, NetIsDead);
 
         if (Object.HasInputAuthority)
@@ -72,13 +80,14 @@ public class PlayerHealth : NetworkBehaviour
     {
         if (!Object.HasStateAuthority || amount <= 0f || NetIsDead) return;
 
+        // FIX SÉCURITÉ : clamp le damage pour éviter les exploits réseau
+        amount = Mathf.Clamp(amount, 0f, MAX_DAMAGE_PER_HIT);
+
         CurrentHealth = Mathf.Max(0f, CurrentHealth - amount);
         Debug.Log($"[HP] Damage {amount} by={killerRef} -> {CurrentHealth}/{maxHealth} (reason={reason})");
 
         RPC_UpdateHealthUI(CurrentHealth, maxHealth);
         RPC_OnHitFeedback();
-
-        // ✅ BLOOD FX POUR TOUT LE MONDE (compatible SpawnBloodEffect(Vector2))
         RPC_SpawnBloodFxForAll(-transform.right);
 
         if (CurrentHealth > 0f) return;
@@ -96,8 +105,14 @@ public class PlayerHealth : NetworkBehaviour
         RPC_RespawnVisualsAll(false);
     }
 
+    // FIX SÉCURITÉ : clamp le damage dans le RPC pour bloquer les valeurs malveillantes
     [Rpc(RpcSources.All, RpcTargets.StateAuthority)]
-    private void RPC_ApplyDamage(float amount, PlayerRef killerRef) => ServerApplyDamage(amount, killerRef, "RPC_ApplyDamage");
+    private void RPC_ApplyDamage(float amount, PlayerRef killerRef)
+    {
+        // Validation supplémentaire côté StateAuthority
+        if (amount <= 0f || amount > MAX_DAMAGE_PER_HIT) return;
+        ServerApplyDamage(amount, killerRef, "RPC_ApplyDamage");
+    }
 
     public void TakeDamage(float amount, NetworkObject attackerNO)
     {
@@ -124,7 +139,6 @@ public class PlayerHealth : NetworkBehaviour
     {
         if (audioSource && hitSound) audioSource.PlayOneShot(hitSound);
 
-        // (garde ton hit feedback local)
         playerWeapon?.SpawnBloodEffect(-transform.right);
 
         if (Object != null && Object.HasInputAuthority)
@@ -157,7 +171,7 @@ public class PlayerHealth : NetworkBehaviour
         if (playerMovement) playerMovement.enabled = false;
 
         foreach (var rb in allRB2D) if (rb) { rb.linearVelocity = Vector2.zero; rb.bodyType = RigidbodyType2D.Static; }
-        foreach (var c in allCols)  if (c)  c.enabled   = false;
+        foreach (var c in allCols)  if (c)  c.enabled = false;
 
         if (postProcessVolume) postProcessVolume.enabled = true;
         var cam = FindObjectOfType<CameraFollowFusion>(); if (cam) cam.SetZoom(true);
@@ -219,7 +233,13 @@ public class PlayerHealth : NetworkBehaviour
         if (hasLifeBefore)
         {
             NetRemainingLives--;
-            Invoke(nameof(RespawnServer), 6f);
+
+            // FIX : ne planifier le respawn qu'une seule fois
+            if (!_respawnScheduled)
+            {
+                _respawnScheduled = true;
+                Invoke(nameof(RespawnServer), 6f);
+            }
         }
         else
         {
@@ -233,7 +253,7 @@ public class PlayerHealth : NetworkBehaviour
                 }
                 else
                 {
-                    Debug.LogError("[HP] Final death MAIS pas StateAuthority -> pas de NotifyFinalDeath (vérifie autorité).");
+                    Debug.LogError("[HP] Final death MAIS pas StateAuthority -> pas de NotifyFinalDeath.");
                 }
             }
 
@@ -245,7 +265,11 @@ public class PlayerHealth : NetworkBehaviour
 
     private void RespawnServer()
     {
-        if (!Object.HasStateAuthority) return;
+        // FIX : vérifications défensives avant d'accéder à l'objet réseau
+        if (!this || !gameObject || !gameObject.activeInHierarchy) return;
+        if (!Object || !Object.HasStateAuthority) return;
+
+        _respawnScheduled = false;
 
         CurrentHealth = maxHealth;
         NetIsDead = false;
@@ -274,6 +298,13 @@ public class PlayerHealth : NetworkBehaviour
     // ======== Lobby reset ========
     public void ResetForLobby()
     {
+        // FIX : annule le respawn planifié si on retourne au lobby avant qu'il se déclenche
+        if (_respawnScheduled)
+        {
+            CancelInvoke(nameof(RespawnServer));
+            _respawnScheduled = false;
+        }
+
         if (Object != null && Object.HasStateAuthority)
             DoResetForLobby_Server();
         else
@@ -285,6 +316,13 @@ public class PlayerHealth : NetworkBehaviour
 
     private void DoResetForLobby_Server()
     {
+        // FIX : annule aussi le respawn planifié côté serveur
+        if (_respawnScheduled)
+        {
+            CancelInvoke(nameof(RespawnServer));
+            _respawnScheduled = false;
+        }
+
         CurrentHealth         = maxHealth;
         NetIsDead             = false;
         NetRemainingLives     = 1;
@@ -316,7 +354,6 @@ public class PlayerHealth : NetworkBehaviour
         Debug.Log($"[HP] ApplyMaxHPBonus +{bonus} -> {CurrentHealth}/{maxHealth}");
     }
 
-    // ✅ RPC BLOOD FX (All) compatible SpawnBloodEffect(Vector2)
     [Rpc(RpcSources.StateAuthority, RpcTargets.All)]
     private void RPC_SpawnBloodFxForAll(Vector2 dir)
     {

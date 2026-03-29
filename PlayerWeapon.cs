@@ -5,48 +5,38 @@ using System.Collections;
 #region Weapon Ammo Interface
 public interface IWeaponAmmo
 {
-    // Read-only info
     int AmmoInMag { get; }
     int MagSize { get; }
     bool IsReloading { get; }
     float ReloadSeconds { get; }
 
-    // Server-side control
     void ServerInitAmmo();
     bool ServerCanFire();
     void ServerConsumeOnFire(NetworkRunner runner);
     bool ServerStartReload(NetworkRunner runner);
     void ServerTickReload(NetworkRunner runner);
 
-    // FX accessors
     AudioSource GetAudioSource();
     AudioClip   GetShootSfx();
     AudioClip   GetReloadSfx();
     Animator    GetAnimator();
     string      GetShootTrigger();
 
-    // Optional muzzle
     Animator    GetMuzzleAnimator();
     string      GetMuzzleTrigger();
 
-    // Bullet prefab
     NetworkPrefabRef GetBulletPrefab();
 }
 #endregion
 
-// ===== NEW: types d'ammo pris en charge par la banque du joueur =====
 public enum AmmoKind { Pistol, Thompson, Shotgun }
 
-/// <summary>
-/// PlayerWeapon (Fusion 2) — contrôle commun des armes + FX réseau.
-/// Les scripts d'armes implémentent IWeaponAmmo (chargeur/reload/sons/anims).
-/// </summary>
 public class PlayerWeapon : NetworkBehaviour
 {
     [Header("References")]
     [SerializeField] private Transform weaponHolderRight;
     [SerializeField] private Transform weaponHolderLeft;
-    [SerializeField] private GameObject bloodEffectPrefab; // fallback local
+    [SerializeField] private GameObject bloodEffectPrefab;
 
     [Header("Blood FX (Network Prefab)")]
     [SerializeField] private NetworkPrefabRef bloodFxNetPrefab;
@@ -80,6 +70,14 @@ public class PlayerWeapon : NetworkBehaviour
     [Networked] private float NetAimZ { get; set; }
     [Networked] public NetworkString<_16> NetWeaponName { get; set; }
 
+    // FIX SÉCURITÉ : fire rate validé côté serveur
+    // On stocke le temps du dernier tir côté StateAuthority pour bloquer le spam RPC
+    [Networked] private float NetLastShootTime { get; set; }
+
+    // Intervalle minimum entre deux tirs côté serveur (en secondes de simulation)
+    // Valeur conservative : le plus rapide est Thompson (~0.13s), on met 0.08 pour tolérer le lag
+    private const float MIN_SERVER_FIRE_INTERVAL = 0.08f;
+
     private GameObject currentWeapon;
     private string currentWeaponName;
     private float nextFireTime;
@@ -97,12 +95,11 @@ public class PlayerWeapon : NetworkBehaviour
     private Transform CurrentHolder => usingLeftHolder && weaponHolderLeft ? weaponHolderLeft :
                                        (!usingLeftHolder && weaponHolderRight ? weaponHolderRight : transform);
 
-    // ===== NEW: banques de munitions côté joueur (serveur) =====
+    // Banques de munitions côté joueur (serveur)
     private int _bankPistol;
     private int _bankThompson;
     private int _bankShotgun;
 
-    // ===== NEW: API banque =====
     public void ServerAddReserveToBank(AmmoKind kind, int amount)
     {
         if (!Object || !Object.HasStateAuthority) return;
@@ -126,9 +123,6 @@ public class PlayerWeapon : NetworkBehaviour
         return 0;
     }
 
-    // ✅ Shared : RPC All→StateAuthority pour créditer les munitions
-    // Le StateAuthority du PlayerWeapon = le client propriétaire
-    // N'importe quel client (ex: AmmoPickup) peut déclencher ce RPC
     [Rpc(RpcSources.All, RpcTargets.StateAuthority)]
     public void RPC_AddAmmoFromPickup(int kindInt, int amount)
     {
@@ -179,12 +173,10 @@ public class PlayerWeapon : NetworkBehaviour
             RPC_ShowAmmoToast(kindInt, amount);
     }
 
-    // Champ pour le toast (accès depuis RPC_AddAmmoFromPickup)
     [Header("Toast")]
     [SerializeField] private bool showToast = true;
     [SerializeField] private bool toastOnlyForEquipped = true;
 
-    // ===== BONUS CLASSE : DOG OF WAR =====
     public void AddReserveAmmoAll(int pistol, int shotgun, int thompson)
     {
         if (!Object || !Object.HasStateAuthority) return;
@@ -193,7 +185,6 @@ public class PlayerWeapon : NetworkBehaviour
         if (shotgun  > 0) ServerAddReserveToBank(AmmoKind.Shotgun,  shotgun);
         if (thompson > 0) ServerAddReserveToBank(AmmoKind.Thompson, thompson);
 
-        // Feedback owner (Fusion 2 : plus de .IsValid → on compare à PlayerRef.None)
         if (Object && Object.InputAuthority != PlayerRef.None)
         {
             if (pistol   > 0) RPC_ShowAmmoToast((int)AmmoKind.Pistol,   pistol);
@@ -240,7 +231,6 @@ public class PlayerWeapon : NetworkBehaviour
             if (!HasInputAuthority) ApplyAimToWeapon(NetAimZ, false);
         }
 
-        // Tick reload serveur
         if (Object.HasStateAuthority && currentWeapon != null)
         {
             var ammoWpn = GetWeaponAmmo(currentWeapon);
@@ -262,7 +252,6 @@ public class PlayerWeapon : NetworkBehaviour
         if (HasInputAuthority && Input.GetKeyDown(dropKey)) UnequipWeapon(true);
         if (!currentWeapon) return;
 
-        // OWNER: rotation immédiate
         if (HasInputAuthority && Camera.main)
         {
             Transform wp = currentWeapon.transform;
@@ -415,7 +404,6 @@ public class PlayerWeapon : NetworkBehaviour
         shotgun  ?.AssignReferences();
         thompson ?.AssignReferences();
 
-        // Init ammo serveur + ===== NEW: transfert BANQUE → ARME =====
         if (Object.HasStateAuthority)
         {
             var ammoWpn = GetWeaponAmmo(weaponObject);
@@ -451,7 +439,6 @@ public class PlayerWeapon : NetworkBehaviour
             return;
         }
 
-        // ===== NEW: rapatrie la réserve de l'arme vers la banque AVANT destruction
         BankReserveFromCurrentWeapon();
 
         SafeDestroyWeapon(currentWeapon);
@@ -475,7 +462,7 @@ public class PlayerWeapon : NetworkBehaviour
         { Debug.LogWarning("[PlayerWeapon] lootableWeaponPrefab non assigné."); RPC_UnequipForAll(); return; }
 
         Vector3 pos = GetDropPosition();
-pos.y -= 0.25f;
+        pos.y -= 0.25f;
         var selected = GetLootPrefabFor(currentWeaponName);
         var loot = Runner.Spawn(selected, pos, Quaternion.identity);
         var lw = loot.GetComponent<LootableWeapon>();
@@ -512,7 +499,6 @@ pos.y -= 0.25f;
     [Rpc(RpcSources.StateAuthority, RpcTargets.All, InvokeLocal = true)]
     private void RPC_UnequipForAll()
     {
-        // ===== NEW: rapatrie la réserve de l'arme vers la banque AVANT destruction
         BankReserveFromCurrentWeapon();
 
         SafeDestroyWeapon(currentWeapon);
@@ -522,7 +508,6 @@ pos.y -= 0.25f;
         if (Object.HasStateAuthority) NetWeaponName = default;
     }
 
-    // ===== NEW: utilitaire banque ← arme =====
     private void BankReserveFromCurrentWeapon()
     {
         if (!(Object && Object.HasStateAuthority) || !currentWeapon) return;
@@ -549,10 +534,18 @@ pos.y -= 0.25f;
     [Rpc(RpcSources.All, RpcTargets.StateAuthority)]
     private void RPC_ServerTryShootBullet(Vector2 clientDir)
     {
+        // FIX SÉCURITÉ : validation du fire rate côté serveur
+        // Empêche un client de spammer ce RPC plus vite que le fireInterval de l'arme
+        if (Runner != null)
+        {
+            float simTime = Runner.SimulationTime;
+            if (simTime - NetLastShootTime < MIN_SERVER_FIRE_INTERVAL) return;
+            NetLastShootTime = simTime;
+        }
+
         var ammoWpn = GetWeaponAmmo(currentWeapon);
         if (ammoWpn == null) return;
 
-        // ❌ PAS de réinit ici ! On laisse ServerCanFire() bloquer le tir si ammo == 0
         if (!ammoWpn.ServerCanFire())
         {
             if (ammoWpn.ServerStartReload(Runner))
@@ -570,8 +563,6 @@ pos.y -= 0.25f;
         float angleDeg = Mathf.Atan2(dir.y, dir.x) * Mathf.Rad2Deg;
         Quaternion rot = Quaternion.Euler(0f, 0f, angleDeg);
 
-        // ✅ Shared : on spawn la balle avec _ownerRef comme inputAuthority
-        // mais on stocke le killerRef dans la balle via Init()
         var bullet = Runner.Spawn(prefab, spawnPos, rot, _ownerRef);
         var b = bullet.GetComponent<Bullet>();
         if (b != null) b.Init(dir, this.gameObject, _ownerNO, _ownerRef);
@@ -588,10 +579,20 @@ pos.y -= 0.25f;
     [Rpc(RpcSources.All, RpcTargets.StateAuthority)]
     private void RPC_ServerTryShootPellets(Vector2 clientDir, int pellets, float spreadDeg)
     {
+        // FIX SÉCURITÉ : même validation fire rate pour le shotgun
+        if (Runner != null)
+        {
+            float simTime = Runner.SimulationTime;
+            if (simTime - NetLastShootTime < MIN_SERVER_FIRE_INTERVAL) return;
+            NetLastShootTime = simTime;
+        }
+
+        // FIX SÉCURITÉ : clamp les pellets pour éviter l'abus (un client enverrait 9999 pellets)
+        pellets = Mathf.Clamp(pellets, 1, 12);
+
         var ammoWpn = GetWeaponAmmo(currentWeapon);
         if (ammoWpn == null) return;
 
-        // ❌ PAS de réinit ici non plus
         if (!ammoWpn.ServerCanFire())
         {
             if (ammoWpn.ServerStartReload(Runner))
@@ -840,16 +841,15 @@ pos.y -= 0.25f;
     }
 
     [Rpc(RpcSources.StateAuthority, RpcTargets.All, Channel = RpcChannel.Reliable, InvokeLocal = true)]
-private void RPC_SpawnBlood(Vector2 pos, Vector2 surfaceNormal, float dirXSign)
-{
-    if (!bloodEffectPrefab) return;
+    private void RPC_SpawnBlood(Vector2 pos, Vector2 surfaceNormal, float dirXSign)
+    {
+        if (!bloodEffectPrefab) return;
 
-    var go = GameObject.Instantiate(bloodEffectPrefab, pos, Quaternion.identity);
-    if (surfaceNormal.sqrMagnitude > 0.0001f) go.transform.up = surfaceNormal.normalized;
-    go.transform.Rotate(0f, 0f, Random.Range(-20f, 20f));
-    Destroy(go, 2f);
-}
-
+        var go = GameObject.Instantiate(bloodEffectPrefab, pos, Quaternion.identity);
+        if (surfaceNormal.sqrMagnitude > 0.0001f) go.transform.up = surfaceNormal.normalized;
+        go.transform.Rotate(0f, 0f, Random.Range(-20f, 20f));
+        Destroy(go, 2f);
+    }
 
     private int GetCurrentWeaponDamage()
     {
@@ -860,14 +860,23 @@ private void RPC_SpawnBlood(Vector2 pos, Vector2 surfaceNormal, float dirXSign)
         return pistolDamage;
     }
 
-    // ======== LOBBY RESET (dé-équipe + nettoie NetWeaponName serveur) ========
     public void ResetForLobby()
     {
         UnequipWeapon(drop: false);
         if (Object && Object.HasStateAuthority) NetWeaponName = default;
     }
 
-    // ======== Utilisé par Loot/AmmoPickup → plein de chargeur serveur ========
+    // FIX BUG 1 : RPC envoyé par MatchFlow (StateAuthority de MatchFlow)
+    // vers la StateAuthority du PlayerWeapon (= le client propriétaire en Shared Mode).
+    // Garantit que NetWeaponName est remis à default sur le bon client,
+    // ce qui propage le déséquipement à tous les autres via la replication normale.
+    [Rpc(RpcSources.All, RpcTargets.StateAuthority, InvokeLocal = true)]
+    public void RPC_ResetForLobbyFromServer()
+    {
+        UnequipWeapon(drop: false);
+        NetWeaponName = default;
+    }
+
     public void SetMagFromLoot(int _)
     {
         if (Object && Object.HasStateAuthority)

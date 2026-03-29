@@ -13,6 +13,11 @@ public class AmmoHUD : MonoBehaviour
     private float _t;
     private PlayerWeapon _localPW;
 
+    // FIX PERF : évite de lancer FindObjectsOfType à chaque tick quand aucun joueur n'est trouvé.
+    // On ne cherche pas plus d'une fois par seconde.
+    private float _findCooldown = 0f;
+    private const float FIND_RETRY_INTERVAL = 1f;
+
     private void Update()
     {
         _t += Time.deltaTime;
@@ -21,8 +26,20 @@ public class AmmoHUD : MonoBehaviour
 
         if (_localPW == null)
         {
+            // FIX : cooldown sur la recherche pour ne pas appeler FindObjectsOfType 20x/s
+            _findCooldown -= refreshRate;
+            if (_findCooldown > 0f) return;
+
+            _findCooldown = FIND_RETRY_INTERVAL;
             _localPW = FindLocalPlayerWeapon();
-            if (_localPW == null) return;
+
+            if (_localPW == null)
+            {
+                // Pas encore trouvé, on affiche "--" et on attend le prochain retry
+                if (magText)     magText.text     = "--";
+                if (reserveText) reserveText.text = "--";
+                return;
+            }
         }
 
         UpdateUI(_localPW);
@@ -30,12 +47,11 @@ public class AmmoHUD : MonoBehaviour
 
     private PlayerWeapon FindLocalPlayerWeapon()
     {
-        // Cherche tous les PlayerWeapon et prend celui du joueur local
         var all = FindObjectsOfType<PlayerWeapon>(true);
         foreach (var pw in all)
         {
             var no = pw.GetComponentInParent<Fusion.NetworkObject>();
-            if (no != null && no.HasInputAuthority) // joueur local
+            if (no != null && no.HasInputAuthority)
                 return pw;
         }
         return null;
@@ -43,7 +59,6 @@ public class AmmoHUD : MonoBehaviour
 
     private void UpdateUI(PlayerWeapon pw)
     {
-        // Essaie de lire les valeurs depuis l'arme équipée
         var weaponGO = pw.GetCurrentWeapon();
         if (weaponGO == null)
         {
@@ -57,7 +72,7 @@ public class AmmoHUD : MonoBehaviour
         if (pistol != null)
         {
             magText.text = pistol.AmmoInMag.ToString();
-            reserveText.text = pistol.ServerGetReserve().ToString(); // si c'est accessible côté client, sinon on change plus bas
+            reserveText.text = pistol.ServerGetReserve().ToString();
             return;
         }
 

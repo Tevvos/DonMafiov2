@@ -44,13 +44,10 @@ public class GameRules_Victory_Fusion : NetworkBehaviour
     private int   _playersCountAtStart = 0;
     private float _roundStartServerTime = 0f;
 
-    // Feu vert externe (ex: MatchFlow_Fusion quand la partie démarre vraiment)
     private static bool _externalMatchStarted = false;
 
     bool HasServerAuthorityStrict() => Object && Object.HasStateAuthority;
 
-    // --- API publique pour ton flow ---
-    /// <summary>Appelle true quand la partie démarre (après le spawn / intro), false au retour lobby.</summary>
     public static void SetExternalMatchStarted(bool started)
     {
         _externalMatchStarted = started;
@@ -70,25 +67,19 @@ public class GameRules_Victory_Fusion : NetworkBehaviour
         _roundStartServerTime = 0f;
 
         SetGameLive(false);
-        Debug.Log($"[Victory] Spawned. HasStateAuthority={(Object ? Object.HasStateAuthority : false)} | Runner.IsServer={(Runner ? Runner.IsServer : false)} | HasNO={(GetComponent<NetworkObject>()!=null)}");
-        if (!Object) Debug.LogError("[Victory] Object==null -> Ce NetworkBehaviour n'est PAS spawné par Fusion (NetworkObject/SceneManager manquant).");
+        Debug.Log($"[Victory] Spawned. HasStateAuthority={(Object ? Object.HasStateAuthority : false)}");
+        if (!Object) Debug.LogError("[Victory] Object==null -> Ce NetworkBehaviour n'est PAS spawné par Fusion.");
     }
 
     public override void FixedUpdateNetwork()
     {
-        if (!HasServerAuthorityStrict())
-        {
-            if (Runner && Runner.Tick % 60 == 0) VLog("[Victory] Ignore tick (pas StateAuthority).");
-            return;
-        }
+        if (!HasServerAuthorityStrict()) return;
 
-        // === Verrou anti-lobby ===
         bool matchStarted = IsGameplayContextOk() && IsExternalGateOk();
         if (!matchStarted)
         {
-            // Tant qu’on n’est pas en jeu, on s’assure qu’aucun round ne tourne ni ne démarre
             if (_roundActive || IsGameLive)
-                Debug.LogWarning("[Victory] Contexte pas 'en jeu' -> on désactive le round et la 'live state' (anti-lobby).");
+                Debug.LogWarning("[Victory] Contexte pas 'en jeu' -> désactivation round (anti-lobby).");
 
             _roundActive = false;
             _roundFinished = false;
@@ -96,10 +87,9 @@ public class GameRules_Victory_Fusion : NetworkBehaviour
             return;
         }
 
-        // À partir d’ici, on est bien “en jeu”.
         RebuildContestants();
 
-        VLog($"[Victory] Eval Tick -> RoundActive={_roundActive}, Finished={_roundFinished}, Contestants={_contestants.Count}, Eliminated={_eliminated.Count}, PlayersAtStart={_playersCountAtStart}");
+        VLog($"[Victory] Eval Tick -> RoundActive={_roundActive}, Finished={_roundFinished}, Contestants={_contestants.Count}, Eliminated={_eliminated.Count}");
 
         if (_roundActive)
         {
@@ -114,7 +104,6 @@ public class GameRules_Victory_Fusion : NetworkBehaviour
             _roundStartServerTime = 0f;
         }
 
-        // Démarrage de manche (seulement en jeu)
         if (_contestants.Count >= minPlayersToEnableWin)
         {
             if (minRoundStartDelay <= 0f) StartRound();
@@ -144,19 +133,16 @@ public class GameRules_Victory_Fusion : NetworkBehaviour
         var active = new HashSet<PlayerRef>();
         foreach (var p in Runner.ActivePlayers) active.Add(p);
 
-        // Détecte vraiment les avatars, même si PlayerObject n'est pas l'avatar
         var spawned = new HashSet<PlayerRef>();
         foreach (var p in active)
             if (IsSpawnedInGame(p)) spawned.Add(p);
 
-        // Fallback: si requireSpawnedAvatar ET spawned==0 mais Active >= minPlayers, on bascule sur Active
         bool useActiveFallback = requireSpawnedAvatar && spawned.Count == 0 && active.Count >= minPlayersToEnableWin;
         var source = useActiveFallback ? active : (requireSpawnedAvatar ? spawned : active);
 
         if (useActiveFallback)
-            Debug.LogWarning("[Victory] Fallback: Spawned==0 alors qu'il y a des joueurs actifs. On utilise Active pour lancer le round. (Pense à lier l'avatar avec Runner.SetPlayerObject)");
+            Debug.LogWarning("[Victory] Fallback: Spawned==0, utilise Active.");
 
-        // Nettoie / met à jour
         var toRemove = new List<PlayerRef>();
         foreach (var c in _contestants)
             if (!source.Contains(c) || _eliminated.Contains(c))
@@ -167,19 +153,16 @@ public class GameRules_Victory_Fusion : NetworkBehaviour
             if (!_eliminated.Contains(p)) _contestants.Add(p);
 
         if (verboseLogs)
-            VLog($"[Victory] Active={active.Count} | Spawned={spawned.Count} | Contestants={_contestants.Count} | Eliminated={_eliminated.Count} | RequireSpawned={requireSpawnedAvatar} | FallbackUsed={useActiveFallback}");
+            VLog($"[Victory] Active={active.Count} | Spawned={spawned.Count} | Contestants={_contestants.Count} | Eliminated={_eliminated.Count}");
     }
 
-    // ✅ Version robuste : si PlayerObject n'est pas l'avatar, on scanne la scène
     bool IsSpawnedInGame(PlayerRef pref)
     {
-        // 1) Chemin classique : PlayerObject qui EST l'avatar
         if (Runner && Runner.TryGetPlayerObject(pref, out var no) && no != null)
         {
             if (HasGameplay(no)) return true;
         }
 
-        // 2) Chemin robuste : on cherche un avatar qui a l'autorité pref
         foreach (var ph in FindObjectsOfType<PlayerHealth>(true))
             if (ph && ph.Object && ph.Object.InputAuthority == pref) return true;
 
@@ -201,6 +184,7 @@ public class GameRules_Victory_Fusion : NetworkBehaviour
     }
 
     // ---------- External notifications ----------
+
     public static void NotifySpawn(PlayerRef pref)
     {
         if (!Instance) return;
@@ -215,10 +199,24 @@ public class GameRules_Victory_Fusion : NetworkBehaviour
         NotifySpawn(pr.Object.InputAuthority);
     }
 
+    // FIX : NotifyFinalDeath passe maintenant par un RPC All→StateAuthority
+    // En Shared Mode, n'importe quel client peut mourir mais seul le SA de GameRules
+    // peut traiter la victoire. Avant ce fix, l'appel direct était ignoré si appelé
+    // depuis un client qui n'avait pas la StateAuthority sur cet objet.
     public static void NotifyFinalDeath(PlayerRef pref)
     {
         if (!Instance) return;
-        if (!Instance.HasServerAuthorityStrict()) { Instance.VLog("[Victory] NotifyFinalDeath ignoré (pas StateAuthority)."); return; }
+        if (pref == PlayerRef.None) return;
+
+        // Le client appelant envoie un RPC vers la StateAuthority de GameRules
+        // InvokeLocal = true : si on EST déjà StateAuthority, ça s'exécute localement
+        Instance.RPC_NotifyFinalDeath(pref);
+    }
+
+    [Rpc(RpcSources.All, RpcTargets.StateAuthority, InvokeLocal = true)]
+    private void RPC_NotifyFinalDeath(PlayerRef pref)
+    {
+        if (!HasServerAuthorityStrict()) return;
         if (pref == PlayerRef.None) return;
 
         Instance._eliminated.Add(pref);
@@ -230,7 +228,15 @@ public class GameRules_Victory_Fusion : NetworkBehaviour
     public static void NotifyQuit(PlayerRef pref)
     {
         if (!Instance) return;
-        if (!Instance.HasServerAuthorityStrict()) { Instance.VLog("[Victory] NotifyQuit ignoré (pas StateAuthority)."); return; }
+        if (pref == PlayerRef.None) return;
+
+        Instance.RPC_NotifyQuit(pref);
+    }
+
+    [Rpc(RpcSources.All, RpcTargets.StateAuthority, InvokeLocal = true)]
+    private void RPC_NotifyQuit(PlayerRef pref)
+    {
+        if (!HasServerAuthorityStrict()) return;
         if (pref == PlayerRef.None) return;
 
         Instance._eliminated.Add(pref);
@@ -258,10 +264,9 @@ public class GameRules_Victory_Fusion : NetworkBehaviour
 
     void DeclareWinner(PlayerRef pref)
     {
-        // Sécurité anti-lobby : si le contexte n'est pas “en jeu”, on ignore TOUT
         if (!IsGameplayContextOk() || !IsExternalGateOk())
         {
-            Debug.LogWarning("[Victory] Victoire ignorée (contexte non 'en jeu' / gate externe OFF).");
+            Debug.LogWarning("[Victory] Victoire ignorée (contexte non 'en jeu').");
             _roundActive = false;
             _roundFinished = false;
             SetGameLive(false);
@@ -274,19 +279,14 @@ public class GameRules_Victory_Fusion : NetworkBehaviour
         SetGameLive(false);
 
         LastWinnerName = ResolveName(pref);
-        Debug.Log($"[Victory] WINNER = {LastWinnerName} ({pref}). StateAuth={(Object && Object.HasStateAuthority)}");
+        Debug.Log($"[Victory] WINNER = {LastWinnerName} ({pref}).");
 
-        // Attribution points / annonce UI seulement si contexte OK
         GameSceneRankingHub.ReportVictory(pref);
 
         if (HasServerAuthorityStrict())
         {
             Debug.Log("[Victory] Envoi RPC_PresentVictory -> ALL");
             RPC_PresentVictory(pref);
-        }
-        else
-        {
-            Debug.LogError("[Victory] Pas StateAuthority -> RPC_PresentVictory NON envoyé.");
         }
 
         ResetRoundDataOnly();
@@ -296,7 +296,7 @@ public class GameRules_Victory_Fusion : NetworkBehaviour
     {
         if (!IsGameplayContextOk() || !IsExternalGateOk())
         {
-            Debug.LogWarning("[Victory] Stalemate ignoré (contexte non 'en jeu' / gate externe OFF).");
+            Debug.LogWarning("[Victory] Stalemate ignoré (contexte non 'en jeu').");
             _roundActive = false;
             _roundFinished = false;
             SetGameLive(false);
@@ -313,10 +313,6 @@ public class GameRules_Victory_Fusion : NetworkBehaviour
             Debug.Log("[Victory] Stalemate -> Envoi RPC_PresentStalemate -> ALL");
             RPC_PresentStalemate();
         }
-        else
-        {
-            Debug.LogError("[Victory] Pas StateAuthority -> RPC_PresentStalemate NON envoyé.");
-        }
 
         ResetRoundDataOnly();
     }
@@ -330,12 +326,21 @@ public class GameRules_Victory_Fusion : NetworkBehaviour
     }
 
     // ---------- RPCs UI ----------
+
+    // FIX TIMING : on ne vérifie plus IsInGame() ici car MatchStarted peut déjà
+    // être passé à false au moment où le RPC arrive sur les clients.
+    // La protection contre les faux positifs est assurée par le gate en amont
+    // (IsGameplayContextOk + IsExternalGateOk dans DeclareWinner/DeclareStalemate).
     [Rpc(RpcSources.StateAuthority, RpcTargets.All)]
     void RPC_PresentVictory(PlayerRef winnerRef)
     {
         Debug.Log("[Victory] RPC_PresentVictory reçu (client)");
         var wp = EnsureWinPresenter();
-        if (wp != null) { Debug.Log("[Victory] WinPresenter OK -> ShowResult()"); wp.ShowResult(winnerRef, LastWinnerName); }
+        if (wp != null)
+        {
+            Debug.Log("[Victory] WinPresenter OK -> ShowResult()");
+            wp.ShowResultDirect(winnerRef, LastWinnerName);
+        }
         else Debug.LogError("[Victory] AUCUN WinPresenter trouvé lors de RPC_PresentVictory !");
     }
 
@@ -344,7 +349,11 @@ public class GameRules_Victory_Fusion : NetworkBehaviour
     {
         Debug.Log("[Victory] RPC_PresentStalemate reçu (client)");
         var wp = EnsureWinPresenter();
-        if (wp != null) { Debug.Log("[Victory] WinPresenter OK -> ShowStalemate()"); wp.ShowStalemate(); }
+        if (wp != null)
+        {
+            Debug.Log("[Victory] WinPresenter OK -> ShowStalemate()");
+            wp.ShowStalemate();
+        }
         else Debug.LogError("[Victory] AUCUN WinPresenter trouvé lors de RPC_PresentStalemate !");
     }
 
@@ -393,18 +402,17 @@ public class GameRules_Victory_Fusion : NetworkBehaviour
 
     void VLog(string m) { if (verboseLogs) Debug.Log(m); }
 
-    // --- Helpers de contexte ---
     bool IsGameplayContextOk()
     {
         if (!restrictToGameplayScene) return true;
 
         var s = SceneManager.GetActiveScene();
-        bool idxOk = (gameplaySceneBuildIndex >= 0) && (s.buildIndex == gameplaySceneBuildIndex);
+        bool idxOk  = (gameplaySceneBuildIndex >= 0) && (s.buildIndex == gameplaySceneBuildIndex);
         bool nameOk = !string.IsNullOrEmpty(gameplaySceneName) && s.name == gameplaySceneName;
 
         bool ok = idxOk || nameOk;
         if (!ok && verboseLogs)
-            Debug.Log($"[Victory] Scene gate KO -> Active='{s.name}'(#{s.buildIndex}) attendu '{gameplaySceneName}'(#{gameplaySceneBuildIndex}).");
+            Debug.Log($"[Victory] Scene gate KO -> Active='{s.name}'(#{s.buildIndex})");
         return ok;
     }
 

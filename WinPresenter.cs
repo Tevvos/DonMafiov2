@@ -35,14 +35,14 @@ public class WinPresenter : MonoBehaviour
     [Header("Texts")]
     [TextArea(2, 4)] [SerializeField] private string[] victoryLines =
     {
-        "BULLETS DON’T LIE.",
+        "BULLETS DON'T LIE.",
         "ONE DON LEFT STANDING.",
         "THE HOUSE ALWAYS WINS."
     };
 
     [TextArea(2, 4)] [SerializeField] private string[] loseLines =
     {
-        "YOU’RE OUT. BETTER LUCK.",
+        "YOU'RE OUT. BETTER LUCK.",
         "SLEPT WITH THE FISHES.",
         "NEXT ROUND, KID."
     };
@@ -73,21 +73,30 @@ public class WinPresenter : MonoBehaviour
         if (autoReturnText) autoReturnText.gameObject.SetActive(false);
     }
 
-    // --- NEW: garde-fou état de jeu ---
+    // Vérifie si on est vraiment en jeu (utilisé seulement pour les appels directs anciens)
     bool IsInGame()
     {
         return MatchFlow_Fusion.HasInstance && MatchFlow_Fusion.Instance.MatchStarted;
     }
 
+    // --- Ancienne API (avec vérification IsInGame) ---
+    // Conservée pour compatibilité mais ne devrait plus être appelée directement
     public void ShowResult(PlayerRef winnerRef, string winnerName)
     {
-        // Bloque toute victoire si on n’est pas en game
         if (!IsInGame())
         {
-            Debug.Log("[WinPresenter] Ignored ShowResult: not in-game (lobby or round over).");
+            Debug.Log("[WinPresenter] ShowResult ignoré : pas en jeu.");
             return;
         }
+        ShowResultDirect(winnerRef, winnerName);
+    }
 
+    // FIX TIMING : méthode directe appelée par GameRules via RPC
+    // Ne vérifie PAS IsInGame() car MatchStarted peut déjà être false
+    // quand le RPC arrive côté client (race condition).
+    // La protection est assurée en amont dans GameRules_Victory_Fusion.DeclareWinner().
+    public void ShowResultDirect(PlayerRef winnerRef, string winnerName)
+    {
         var runner = FindObjectOfType<NetworkRunner>();
         var local = runner ? runner.LocalPlayer : PlayerRef.None;
         bool iAmWinner = (local != PlayerRef.None && local == winnerRef);
@@ -112,12 +121,7 @@ public class WinPresenter : MonoBehaviour
 
     public void ShowStalemate()
     {
-        // Bloque le stalemate si on n’est pas en game
-        if (!IsInGame())
-        {
-            Debug.Log("[WinPresenter] Ignored ShowStalemate: not in-game (lobby or round over).");
-            return;
-        }
+        // FIX TIMING : même logique, pas de vérification IsInGame ici
         PreparePanel("STALEMATE", "", Pick(stalemateLines, "NO WINNER."), sfxStalemate);
     }
 
@@ -158,7 +162,6 @@ public class WinPresenter : MonoBehaviour
         Play(sfx);
         fadeCo = StartCoroutine(Fade(0f, 1f, Mathf.Max(0.01f, fadeIn)));
 
-        // démarre la coroutine du retour auto
         if (autoReturnCo != null) StopCoroutine(autoReturnCo);
         autoReturnCo = StartCoroutine(AutoReturnSequence());
     }
