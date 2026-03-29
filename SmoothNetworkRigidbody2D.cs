@@ -18,15 +18,17 @@ public class SmoothNetworkRigidbody2D : NetworkBehaviour
 
         if (Object.HasStateAuthority)
         {
-            rb.isKinematic = false;
-            rb.simulated   = true;
+            rb.bodyType  = RigidbodyType2D.Dynamic;
+            rb.simulated = true;
             NetPos  = rb.position;
             NetRotZ = rb.rotation;
         }
         else
         {
-            rb.isKinematic = true;
-            rb.simulated   = false;
+            // Kinematic + simulated=true pour les proxies
+            // La balle utilise useFullKinematicContacts pour les triggers
+            rb.bodyType  = RigidbodyType2D.Kinematic;
+            rb.simulated = true;
         }
     }
 
@@ -43,11 +45,11 @@ public class SmoothNetworkRigidbody2D : NetworkBehaviour
     {
         if (Object.HasStateAuthority) return;
 
-        Vector3 tPos = NetPos;
+        Vector2 tPos = NetPos;
         float   tRot = NetRotZ;
 
         transform.position = Vector2.Lerp(transform.position, tPos, posLerp);
         float z = Mathf.LerpAngle(transform.eulerAngles.z, tRot, rotLerp);
-        transform.rotation = Quaternion.Euler(0f,0f,z);
+        transform.rotation = Quaternion.Euler(0f, 0f, z);
     }
 }

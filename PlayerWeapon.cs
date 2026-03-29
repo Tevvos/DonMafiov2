@@ -126,6 +126,64 @@ public class PlayerWeapon : NetworkBehaviour
         return 0;
     }
 
+    // ✅ Shared : RPC All→StateAuthority pour créditer les munitions
+    // Le StateAuthority du PlayerWeapon = le client propriétaire
+    // N'importe quel client (ex: AmmoPickup) peut déclencher ce RPC
+    [Rpc(RpcSources.All, RpcTargets.StateAuthority)]
+    public void RPC_AddAmmoFromPickup(int kindInt, int amount)
+    {
+        if (amount <= 0) return;
+        var kind = (AmmoKind)kindInt;
+
+        var wpnGO = GetCurrentWeapon();
+        bool appliedToWeapon = false;
+
+        if (wpnGO != null)
+        {
+            switch (kind)
+            {
+                case AmmoKind.Pistol:
+                    var pistol = wpnGO.GetComponentInChildren<Pistol>(true);
+                    if (pistol != null)
+                    {
+                        pistol.ServerAddReserve(amount); appliedToWeapon = true;
+                        if (pistol.AmmoInMag < pistol.MagSize && pistol.ServerGetReserve() > 0)
+                            pistol.ServerStartReload(Runner);
+                    }
+                    break;
+                case AmmoKind.Thompson:
+                    var th = wpnGO.GetComponentInChildren<Thompson>(true);
+                    if (th != null)
+                    {
+                        th.ServerAddReserve(amount); appliedToWeapon = true;
+                        if (th.AmmoInMag < th.MagSize && th.ServerGetReserve() > 0)
+                            th.ServerStartReload(Runner);
+                    }
+                    break;
+                case AmmoKind.Shotgun:
+                    var sg = wpnGO.GetComponentInChildren<Shotgun>(true);
+                    if (sg != null)
+                    {
+                        sg.ServerAddReserve(amount); appliedToWeapon = true;
+                        if (sg.AmmoInMag < sg.MagSize && sg.ServerGetReserve() > 0)
+                            sg.ServerStartReload(Runner);
+                    }
+                    break;
+            }
+        }
+
+        if (!appliedToWeapon)
+            ServerAddReserveToBank(kind, amount);
+
+        if (showToast && (!toastOnlyForEquipped || appliedToWeapon))
+            RPC_ShowAmmoToast(kindInt, amount);
+    }
+
+    // Champ pour le toast (accès depuis RPC_AddAmmoFromPickup)
+    [Header("Toast")]
+    [SerializeField] private bool showToast = true;
+    [SerializeField] private bool toastOnlyForEquipped = true;
+
     // ===== BONUS CLASSE : DOG OF WAR =====
     public void AddReserveAmmoAll(int pistol, int shotgun, int thompson)
     {
@@ -240,7 +298,7 @@ public class PlayerWeapon : NetworkBehaviour
     }
 
     // ====== AIM ======
-    [Rpc(RpcSources.InputAuthority, RpcTargets.StateAuthority, InvokeLocal = true)]
+    [Rpc(RpcSources.All, RpcTargets.StateAuthority, InvokeLocal = true)]
     private void RPC_SetAimZ(float angleDeg) { NetAimZ = angleDeg; }
 
     private void ApplyAimToWeapon(float angleDeg, bool smooth)
@@ -312,7 +370,7 @@ public class PlayerWeapon : NetworkBehaviour
         else RPC_RequestEquip(weaponName);
     }
 
-    [Rpc(RpcSources.InputAuthority, RpcTargets.StateAuthority)]
+    [Rpc(RpcSources.All, RpcTargets.StateAuthority)]
     private void RPC_RequestEquip(string weaponName) { NetWeaponName = weaponName; }
 
     [Rpc(RpcSources.StateAuthority, RpcTargets.All, InvokeLocal = true)]
@@ -448,7 +506,7 @@ pos.y -= 0.25f;
         return basePos + forward * 0.5f + Vector3.down * 0.05f;
     }
 
-    [Rpc(RpcSources.InputAuthority, RpcTargets.StateAuthority)]
+    [Rpc(RpcSources.All, RpcTargets.StateAuthority)]
     private void RPC_ServerDropCurrent(string weaponName) => ServerDropCurrentWeapon();
 
     [Rpc(RpcSources.StateAuthority, RpcTargets.All, InvokeLocal = true)]
@@ -488,7 +546,7 @@ pos.y -= 0.25f;
     }
 
     // ====== RPCs Tir & Reload ======
-    [Rpc(RpcSources.InputAuthority, RpcTargets.StateAuthority)]
+    [Rpc(RpcSources.All, RpcTargets.StateAuthority)]
     private void RPC_ServerTryShootBullet(Vector2 clientDir)
     {
         var ammoWpn = GetWeaponAmmo(currentWeapon);
@@ -512,9 +570,11 @@ pos.y -= 0.25f;
         float angleDeg = Mathf.Atan2(dir.y, dir.x) * Mathf.Rad2Deg;
         Quaternion rot = Quaternion.Euler(0f, 0f, angleDeg);
 
+        // ✅ Shared : on spawn la balle avec _ownerRef comme inputAuthority
+        // mais on stocke le killerRef dans la balle via Init()
         var bullet = Runner.Spawn(prefab, spawnPos, rot, _ownerRef);
         var b = bullet.GetComponent<Bullet>();
-        if (b != null) b.Init(dir, this.gameObject);
+        if (b != null) b.Init(dir, this.gameObject, _ownerNO, _ownerRef);
         if (bullet && bullet.transform) bullet.transform.right = dir;
 
         bool wasReloading = ammoWpn.IsReloading;
@@ -525,7 +585,7 @@ pos.y -= 0.25f;
         RPC_PlayShootFX();
     }
 
-    [Rpc(RpcSources.InputAuthority, RpcTargets.StateAuthority)]
+    [Rpc(RpcSources.All, RpcTargets.StateAuthority)]
     private void RPC_ServerTryShootPellets(Vector2 clientDir, int pellets, float spreadDeg)
     {
         var ammoWpn = GetWeaponAmmo(currentWeapon);
@@ -556,7 +616,7 @@ pos.y -= 0.25f;
 
             var bullet = Runner.Spawn(prefab, spawnPos, rot, _ownerRef);
             var b = bullet.GetComponent<Bullet>();
-            if (b != null) { b.Init(dir, this.gameObject); b.SetDamage(shotgunPelletDamage); }
+            if (b != null) { b.Init(dir, this.gameObject, _ownerNO, _ownerRef); b.SetDamage(shotgunPelletDamage); }
             if (bullet && bullet.transform) bullet.transform.right = dir;
         }
 
@@ -568,7 +628,7 @@ pos.y -= 0.25f;
         RPC_PlayShootFX();
     }
 
-    [Rpc(RpcSources.InputAuthority, RpcTargets.StateAuthority)]
+    [Rpc(RpcSources.All, RpcTargets.StateAuthority)]
     private void RPC_RequestReload()
     {
         var ammoWpn = GetWeaponAmmo(currentWeapon);

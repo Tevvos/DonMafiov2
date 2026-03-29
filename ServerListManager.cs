@@ -572,7 +572,7 @@ public class ServerListManager : MonoBehaviour
 
             var args = new StartGameArgs
             {
-                GameMode     = GameMode.Client,
+                GameMode     = GameMode.Shared, // ✅ Shared : doit correspondre à la session hôte
                 SessionName  = sessionName,
                 SceneManager = _sceneManager
             };

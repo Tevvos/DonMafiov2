@@ -241,8 +241,9 @@ if (!canSimulateMovement)
         _isArmed = armed;
         ApplyArmedToAnimator(armed);
 
-        if (Object.HasStateAuthority) NetArmed = armed;
-        else                          RPC_RequestSetArmed(armed);
+        if (Object.HasStateAuthority)      NetArmed = armed;
+        else if (Object.HasInputAuthority) RPC_RequestSetArmed(armed);
+        // proxy : pas de RPC, la replication reseau suffit
     }
 
     // ====== BONUS FURTIF : API publique ======
@@ -254,10 +255,10 @@ if (!canSimulateMovement)
 
     public float GetCurrentSpeed()               => moveSpeed * speedMultiplier;
 
-    [Rpc(RpcSources.InputAuthority, RpcTargets.StateAuthority)]
+    [Rpc(RpcSources.All, RpcTargets.StateAuthority)]
     private void RPC_RequestSetArmed(bool armed) => NetArmed = armed;
 
-    [Rpc(RpcSources.InputAuthority, RpcTargets.StateAuthority)]
+    [Rpc(RpcSources.All, RpcTargets.StateAuthority)]
     private void RPC_UpdateAimSign(int aimSign)
     {
         NetAimSign = (aimSign >= 0) ? 1 : -1;

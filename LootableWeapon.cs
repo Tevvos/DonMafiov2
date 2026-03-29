@@ -195,13 +195,27 @@ public class LootableWeapon : NetworkBehaviour
     // === Pickup rules ===
     private void OnTriggerEnter2D(Collider2D other)
     {
-        if (!Object || !Object.HasStateAuthority) return;
-
         var pw = other.GetComponentInParent<PlayerWeapon>();
         if (pw == null || pw.Object == null) return;
 
+        // ✅ Shared : n'importe quel client peut demander le pickup via RPC
+        // Le StateAuthority valide et applique
+        var playerNO = pw.GetComponentInParent<NetworkObject>();
+        if (playerNO != null)
+            RPC_RequestPickup(playerNO);
+    }
+
+    [Rpc(RpcSources.All, RpcTargets.StateAuthority)]
+    private void RPC_RequestPickup(NetworkObject playerNO)
+    {
+        if (!Object || !Object.HasStateAuthority) return;
+        if (!playerNO) return;
+
+        var pw = playerNO.GetComponent<PlayerWeapon>();
+        if (pw == null) return;
+
         // Empêche le dropper de ramasser instantanément
-        if (pw.Object.InputAuthority == NetDropper)
+        if (playerNO.InputAuthority == NetDropper)
         {
             if (!_exitSatisfied || PickupDelay.IsRunning) return;
         }

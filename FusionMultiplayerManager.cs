@@ -11,22 +11,32 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Text.RegularExpressions;
 
+/// <summary>
+/// FusionMultiplayerManager — GameMode.Shared (style Among Us)
+///
+/// Chaque room = une session Fusion indépendante (SessionName).
+/// Pas de host : tous égaux, StateAuthority par objet.
+/// La partie continue si quelqu'un quitte.
+/// Rooms totalement isolées.
+///
+/// Boutons UI :
+///   CreateRoom  → Shared, nom saisi ou aléatoire (unicité garantie)
+///   JoinRoom    → Shared, nom exact saisi
+///   QuickPlay   → Shared, room aléatoire existante ou nouvelle
+/// </summary>
 public class FusionMultiplayerManager : MonoBehaviour, INetworkRunnerCallbacks
 {
-    // --------- Singleton persistant ---------
+    // ─── Singleton ────────────────────────────────────────────────────
     public static FusionMultiplayerManager Instance { get; private set; }
 
     private void MakeSingleton()
     {
-        if (Instance != null && Instance != this)
-        {
-            Destroy(gameObject);
-            return;
-        }
+        if (Instance != null && Instance != this) { Destroy(gameObject); return; }
         Instance = this;
         DontDestroyOnLoad(gameObject);
     }
 
+    // ─── UI ───────────────────────────────────────────────────────────
     [Header("UI")]
     [SerializeField] private TMP_InputField roomNameInput;
     [SerializeField] private Button createButton;
@@ -35,44 +45,38 @@ public class FusionMultiplayerManager : MonoBehaviour, INetworkRunnerCallbacks
     [SerializeField] private GameObject loadingOverlay;
     [SerializeField] private GameObject menuRoot;
 
+    // ─── Fusion ───────────────────────────────────────────────────────
     [Header("Fusion")]
     [SerializeField] private NetworkPrefabRef playerPrefab;
     [SerializeField] private int gameSceneBuildIndex = 2;
 
+    // ─── Options ──────────────────────────────────────────────────────
     [Header("Options")]
-    [Tooltip("Historique du dernier nom; n'est plus utilisé pour préremplir l'input.")]
-    [SerializeField] private bool autoFillLastRoomName = false; // <- forcé à false
     [SerializeField] private int runnerShutdownTimeoutMs = 3000;
-    [SerializeField] private float shutdownCooldownSeconds = 1.0f;   // ← anti double-déclenchement
+    [SerializeField] private float shutdownCooldownSeconds = 1.0f;
     [SerializeField] private bool logVerbose = true;
-    [SerializeField] private bool forceSafeRespawnAfterMigration = true;
 
     private const string PREF_LAST_ROOM = "DM_LastRoomName";
 
-    // Runner / state
+    // ─── Etat interne ─────────────────────────────────────────────────
     private NetworkRunner runner;
     private volatile bool isStarting;
-    private volatile bool runnerReady; // true quand on a un runner stable prêt à StartGame
-    private SemaphoreSlim startLock = new SemaphoreSlim(1,1);
-
-    // Cooldown après shutdown
+    private volatile bool runnerReady;
+    private SemaphoreSlim startLock = new SemaphoreSlim(1, 1);
     private float _cooldownUntilUnscaled = 0f;
 
-    // Migration state (persistant)
-    private bool _hostMigrationInProgress;
-    private bool _awaitingMigrationWindow;
-    private float _awaitingMigrationDeadline;
-
-    // Cache de rooms existantes (via lobby)
-    private readonly HashSet<string> _knownSessionNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _knownSessionNames =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
     public event Action<List<SessionInfo>> OnSessionsUpdated;
 
-    // ---------------- LIFECYCLE ----------------
+    // =================================================================
+    //  LIFECYCLE
+    // =================================================================
+
     private void Awake()
     {
         MakeSingleton();
-
         SetButtons(false);
         SetLoading(true);
         StartCoroutine(InitRunnerAndUi());
@@ -80,9 +84,7 @@ public class FusionMultiplayerManager : MonoBehaviour, INetworkRunnerCallbacks
 
     private IEnumerator InitRunnerAndUi()
     {
-        // 1) Essaye de rebind un runner existant (Bootloader, etc.)
-        float timeout = 3f;
-        float t0 = Time.unscaledTime;
+        float timeout = 3f, t0 = Time.unscaledTime;
         while (runner == null && Time.unscaledTime - t0 < timeout)
         {
             runner = GetComponent<NetworkRunner>() ?? FindObjectOfType<NetworkRunner>();
@@ -90,36 +92,22 @@ public class FusionMultiplayerManager : MonoBehaviour, INetworkRunnerCallbacks
             yield return null;
         }
 
-        // 2) S’il n’y en a aucun -> on le crée proprement
-        if (runner == null)
-        {
-            Log("ℹ️ Aucun NetworkRunner trouvé -> EnsureRunner()");
-            EnsureRunner(); // ← création + DontDestroyOnLoad
-        }
+        if (runner == null) { Log("ℹ️ Aucun runner → EnsureRunner()"); EnsureRunner(); }
 
-        // Sécurité: s’il a été détruit ailleurs, re-ensure
         if (runner == null)
         {
-            Debug.LogError("❌ Échec de création du NetworkRunner.");
-            SetLoading(false);
-            SetButtons(false);
-            yield break;
+            Debug.LogError("❌ Échec création NetworkRunner.");
+            SetLoading(false); SetButtons(false); yield break;
         }
 
         runner.ProvideInput = true;
         runnerReady = true;
 
-        // Input room toujours vide (pas de pré-remplissage)
         if (roomNameInput) roomNameInput.text = string.Empty;
-
-        // UI seulement quand le runner est bien idle
         yield return EnsureRunnerIdleThenEnableUI();
     }
 
-    private void OnEnable()
-    {
-        StartCoroutine(CheckRunnerRebindLoop());
-    }
+    private void OnEnable() => StartCoroutine(CheckRunnerRebindLoop());
 
     private IEnumerator CheckRunnerRebindLoop()
     {
@@ -128,12 +116,7 @@ public class FusionMultiplayerManager : MonoBehaviour, INetworkRunnerCallbacks
             if (runner == null)
             {
                 var found = FindObjectOfType<NetworkRunner>();
-                if (found != null)
-                {
-                    runner = found;
-                    runner.ProvideInput = true;
-                    Log("🔁 NetworkRunner rebindé dynamiquement.");
-                }
+                if (found != null) { runner = found; runner.ProvideInput = true; Log("🔁 Runner rebindé."); }
             }
             yield return new WaitForSecondsRealtime(0.5f);
         }
@@ -141,15 +124,13 @@ public class FusionMultiplayerManager : MonoBehaviour, INetworkRunnerCallbacks
 
     private void OnApplicationQuit()
     {
-        if (runner && runner.IsRunning)
-            runner.Shutdown(); // pas d'attente bloquante ici
+        if (runner && runner.IsRunning) runner.Shutdown();
     }
 
-    // ---------------- ENSURE RUNNER ----------------
-    /// <summary>
-    /// Crée un NetworkRunner + NetworkSceneManagerDefault si on n’en trouve aucun. Le tout en DontDestroyOnLoad.
-    /// Idempotent: si un runner existe déjà, ne fait rien.
-    /// </summary>
+    // =================================================================
+    //  ENSURE RUNNER
+    // =================================================================
+
     private void EnsureRunner()
     {
         if (runner != null) return;
@@ -158,106 +139,85 @@ public class FusionMultiplayerManager : MonoBehaviour, INetworkRunnerCallbacks
         if (existing != null)
         {
             runner = existing;
-            if (runner.GetComponent<NetworkSceneManagerDefault>() == null)
+            if (!runner.GetComponent<NetworkSceneManagerDefault>())
                 runner.gameObject.AddComponent<NetworkSceneManagerDefault>();
             DontDestroyOnLoad(runner.gameObject);
-            Log("✅ EnsureRunner: runner existant ré-associé + NSceneMgrOK.");
+            Log("✅ EnsureRunner: runner existant ré-associé.");
             return;
         }
 
-        // Création d’un runner propre
         var go = new GameObject("FusionRunnerManager");
         DontDestroyOnLoad(go);
-
         runner = go.AddComponent<NetworkRunner>();
         runner.ProvideInput = true;
-
-        if (runner.GetComponent<NetworkSceneManagerDefault>() == null)
+        if (!runner.GetComponent<NetworkSceneManagerDefault>())
             runner.gameObject.AddComponent<NetworkSceneManagerDefault>();
-
-        Log("✅ EnsureRunner: runner créé + NetworkSceneManagerDefault ajouté.");
+        Log("✅ EnsureRunner: nouveau runner créé.");
     }
 
     private IEnumerator EnsureRunnerIdleThenEnableUI()
     {
-        // Si le runner n’existe plus (détruit pendant le chargement), on le recrée
-        if (runner == null)
-        {
-            Log("⚠️ EnsureRunnerIdle: runner null → EnsureRunner()");
-            EnsureRunner();
-            // petit yield pour laisser Unity initialiser les comp
-            yield return null;
-        }
+        if (runner == null) { EnsureRunner(); yield return null; }
 
-        // S’il est actif, on le coupe proprement pour repartir en idle
         if (runner != null && runner.IsRunning)
         {
-            Log("🔻 Ancien runner actif -> Shutdown...");
+            Log("🔻 Runner actif → Shutdown...");
             runner.Shutdown();
         }
 
-        float timeout = 5f;
         float t0 = Time.realtimeSinceStartup;
-        while (runner != null && runner.IsRunning && (Time.realtimeSinceStartup - t0) < timeout)
+        while (runner != null && runner.IsRunning && Time.realtimeSinceStartup - t0 < 5f)
             yield return null;
 
-        // Active l’UI uniquement hors cooldown
         while (Time.unscaledTime < _cooldownUntilUnscaled)
             yield return null;
 
-        Log("✅ Runner idle. UI réactivée.");
+        Log("✅ Runner idle. UI activée.");
         SetButtons(true);
         SetLoading(false);
         isStarting = false;
     }
 
-    // ---------------- UI ACTIONS ----------------
+    // =================================================================
+    //  BOUTONS UI — tous GameMode.Shared
+    // =================================================================
+
     public async void OnClickCreateRoom()
     {
         if (!CanStart()) return;
         isStarting = true;
-        await StartGameSafe(GameMode.Host);
+        await StartGameSafe(isCreate: true);
     }
 
     public async void OnClickJoinRoom()
     {
         if (!CanStart()) return;
         isStarting = true;
-        await StartGameSafe(GameMode.Client);
+        await StartGameSafe(isCreate: false);
     }
 
     public async void OnClickQuickPlay()
     {
         if (!CanStart()) return;
         isStarting = true;
-        await StartGameSafe(GameMode.AutoHostOrClient);
+        await StartGameSafe(isCreate: false, quickPlay: true);
     }
 
     private bool CanStart()
     {
-        // Bloque si on sort d’un shutdown (cooldown anti double-clics)
         if (Time.unscaledTime < _cooldownUntilUnscaled) return false;
         if (isStarting) return false;
-
-        if (!playerPrefab.IsValid)
-        {
-            Debug.LogError("🟥 PlayerPrefab non assigné (NetworkPrefabRef invalide).");
-            return false;
-        }
-
-        // S’assure qu’on a un runner disponible
+        if (!playerPrefab.IsValid) { Debug.LogError("🟥 PlayerPrefab non assigné."); return false; }
         if (runner == null) EnsureRunner();
-
-        if (!runnerReady && runner == null)
-        {
-            Debug.LogWarning("⚠️ Runner pas prêt. Attends un peu.");
-            return false;
-        }
+        if (!runnerReady && runner == null) { Debug.LogWarning("⚠️ Runner pas prêt."); return false; }
         return true;
     }
 
-    // ---------------- START / SHUTDOWN HELPERS ----------------
-    private async Task StartGameSafe(GameMode mode, HostMigrationToken migrationToken = null, Action<NetworkRunner> onResume = null)
+    // =================================================================
+    //  COEUR : StartGameSafe — GameMode.Shared
+    // =================================================================
+
+    private async Task StartGameSafe(bool isCreate, bool quickPlay = false)
     {
         await startLock.WaitAsync();
         try
@@ -266,34 +226,18 @@ public class FusionMultiplayerManager : MonoBehaviour, INetworkRunnerCallbacks
             SetLoading(true);
             if (menuRoot) menuRoot.SetActive(false);
 
-            // Toujours garantir un runner présent
             if (runner == null) EnsureRunner();
-            if (runner == null)
-            {
-                Debug.LogError("❌ Pas de NetworkRunner disponible (StartGameSafe). Reset UI.");
-                ResetUiState();
-                return;
-            }
+            if (runner == null) { Debug.LogError("❌ Pas de runner. Reset UI."); ResetUiState(); return; }
 
-            // Si un runner tourne encore, on le coupe avant StartGame
             if (runner.IsRunning)
             {
-                Log("⏳ Runner actif -> Shutdown avant StartGame...");
+                Log("⏳ Runner actif → Shutdown...");
                 await ShutdownRunnerWithTimeout(runnerShutdownTimeoutMs);
-                // Cooldown post-shutdown
                 _cooldownUntilUnscaled = Time.unscaledTime + shutdownCooldownSeconds;
-                // Attend la fin du cooldown avant de continuer
-                while (Time.unscaledTime < _cooldownUntilUnscaled)
-                    await Task.Yield();
+                while (Time.unscaledTime < _cooldownUntilUnscaled) await Task.Yield();
             }
 
-            bool isMigration = (migrationToken != null);
-
-            // IMPORTANT : nom unique pour Host / AutoHostOrClient
-            bool mustBeUnique = !isMigration && (mode == GameMode.Host || mode == GameMode.AutoHostOrClient);
-            string room = isMigration ? GetRoomNameForMigration() : BuildRoomName(mustBeUnique);
-
-            // On enregistre le dernier nom, mais sans préremplir à l’avenir
+            string room = BuildRoomName(isCreate, quickPlay);
             PlayerPrefs.SetString(PREF_LAST_ROOM, room);
 
             var sceneManager = runner.GetComponent<NetworkSceneManagerDefault>();
@@ -301,38 +245,26 @@ public class FusionMultiplayerManager : MonoBehaviour, INetworkRunnerCallbacks
 
             var args = new StartGameArgs
             {
-                GameMode     = mode,
+                GameMode     = GameMode.Shared,           // ← TOUJOURS SHARED
                 SessionName  = room,
                 SceneManager = sceneManager,
-                HostMigrationToken  = migrationToken,
-                HostMigrationResume = onResume
+                Scene        = SceneRef.FromIndex(gameSceneBuildIndex),
             };
 
-            if (!isMigration)
-                args.Scene = SceneRef.FromIndex(gameSceneBuildIndex);
-
-            Log($"🚀 StartGame -> Mode={mode} | Room={room} | Scene={(isMigration ? "restored(migration)" : gameSceneBuildIndex.ToString())} | Migration={isMigration}");
+            Log($"🚀 StartGame → Shared | Room={room} | Create={isCreate} | Quick={quickPlay}");
 
             var result = await runner.StartGame(args);
 
             if (!result.Ok)
             {
                 Debug.LogError($"🟥 Échec StartGame : {result.ShutdownReason}");
-                ResetUiState();
-                return;
+                ResetUiState(); return;
             }
 
-            Log($"✅ StartGame lancé : {room} en mode {mode}");
+            Log($"✅ Session Shared OK : {room}");
         }
-        catch (Exception ex)
-        {
-            Debug.LogError($"🟥 Exception StartGameSafe: {ex}");
-            ResetUiState();
-        }
-        finally
-        {
-            startLock.Release();
-        }
+        catch (Exception ex) { Debug.LogError($"🟥 Exception StartGameSafe: {ex}"); ResetUiState(); }
+        finally { startLock.Release(); }
     }
 
     private async Task ShutdownRunnerWithTimeout(int timeoutMs)
@@ -341,299 +273,218 @@ public class FusionMultiplayerManager : MonoBehaviour, INetworkRunnerCallbacks
         {
             if (runner == null) return;
             runner.Shutdown();
-            var t0 = Time.realtimeSinceStartup;
+            float t0 = Time.realtimeSinceStartup;
             while (runner != null && runner.IsRunning && (Time.realtimeSinceStartup - t0) * 1000f < timeoutMs)
                 await Task.Yield();
-
-            if (runner != null && runner.IsRunning)
-                Debug.LogWarning("⚠️ Timeout Shutdown runner, on continue quand même.");
+            if (runner != null && runner.IsRunning) Debug.LogWarning("⚠️ Timeout Shutdown.");
         }
-        catch (Exception ex)
-        {
-            Debug.LogWarning($"⚠️ Shutdown exception: {ex.Message}");
-        }
+        catch (Exception ex) { Debug.LogWarning($"⚠️ Shutdown exception: {ex.Message}"); }
     }
 
-    // Construit un nom (depuis l'input si présent), et garantit l'unicité si demandé
-    private string BuildRoomName(bool ensureUnique)
-    {
-        string src = roomNameInput ? roomNameInput.text : string.Empty;
+    // ─── BuildRoomName ────────────────────────────────────────────────
 
-        // Sanitize
-        src = string.IsNullOrWhiteSpace(src) ? string.Empty
-            : Regex.Replace(src.Trim(), @"[^A-Za-z0-9_\\-]", "");
+    private string BuildRoomName(bool isCreate, bool quickPlay)
+    {
+        if (quickPlay)
+        {
+            // Tente de rejoindre une room existante connue, sinon en crée une
+            if (_knownSessionNames.Count > 0)
+            {
+                var list = new List<string>(_knownSessionNames);
+                return list[UnityEngine.Random.Range(0, list.Count)];
+            }
+            return $"Room_{UnityEngine.Random.Range(1000, 9999)}";
+        }
+
+        string src = roomNameInput ? roomNameInput.text : string.Empty;
+        src = string.IsNullOrWhiteSpace(src)
+            ? string.Empty
+            : Regex.Replace(src.Trim(), @"[^A-Za-z0-9_\-]", "");
 
         if (string.IsNullOrEmpty(src))
             src = $"Room_{UnityEngine.Random.Range(1000, 9999)}";
 
-        if (!ensureUnique)
-            return src;
+        // Join : nom exact
+        if (!isCreate) return src;
 
-        // Cherche un nom libre par rapport aux rooms connues
+        // Create : unicité
         string candidate = src;
         int attempts = 0;
         while (_knownSessionNames.Contains(candidate) && attempts++ < 32)
-            candidate = $"Room_{UnityEngine.Random.Range(1000, 9999)}";
-
+            candidate = $"{src}_{UnityEngine.Random.Range(10, 99)}";
         if (_knownSessionNames.Contains(candidate))
-        {
-            // Dernier recours ultra-unique
-            candidate = $"Room_{DateTime.UtcNow:yyyyMMdd_HHmmss}_{UnityEngine.Random.Range(0,999)}";
-        }
+            candidate = $"Room_{DateTime.UtcNow:HHmmss}_{UnityEngine.Random.Range(0, 999)}";
 
         return candidate;
     }
 
-    private string GetRoomNameForMigration()
-    {
-        var last = PlayerPrefs.GetString(PREF_LAST_ROOM, "");
-        if (!string.IsNullOrWhiteSpace(last)) return last;
-        return $"Room_{UnityEngine.Random.Range(1000, 9999)}";
-    }
+    // =================================================================
+    //  SPAWN — GameMode.Shared
+    //
+    //  En Shared, OnPlayerJoined est appelé chez TOUS pour chaque joueur.
+    //  On ne spawn QUE pour runner.LocalPlayer.
+    // =================================================================
 
-    // ---------------- SPAWN FLOW ----------------
     public void OnPlayerJoined(NetworkRunner runner, PlayerRef player)
     {
         Log($"👥 OnPlayerJoined : {player} (Local={runner.LocalPlayer})");
 
+        // Délègue à MatchFlow_Fusion si présent (il gère le spawn + la logique de match)
         if (FindObjectOfType<MatchFlow_Fusion>() != null)
         {
             Log("➡️ Spawn délégué à MatchFlow_Fusion.");
             return;
         }
 
-        if (!runner.IsServer)
+        // En Shared : chaque client spawne uniquement son propre avatar
+        if (player != runner.LocalPlayer)
         {
-            Log("ℹ️ OnPlayerJoined ignoré côté client (spawn géré par le serveur).");
+            Log($"ℹ️ Joueur distant {player}, pas de spawn local.");
             return;
         }
 
-        StartCoroutine(SpawnWhenReady(runner, player));
+        StartCoroutine(SpawnLocalPlayer(runner, player));
     }
 
-    private IEnumerator SpawnWhenReady(NetworkRunner runner, PlayerRef player)
+    private IEnumerator SpawnLocalPlayer(NetworkRunner runner, PlayerRef player)
     {
+        // Attend que la scène de jeu soit chargée et le GameManager prêt
         while (GameManager_Fusion.Instance == null)
             yield return null;
 
         Vector3 spawnPos = GameManager_Fusion.Instance.GetSpawnPosition();
+
+        // Spawn : on passe player comme inputAuthority → cet objet appartient à ce client
         NetworkObject obj = runner.Spawn(playerPrefab, spawnPos, Quaternion.identity, player);
 
-        Log($"🚀 Spawn joueur : {player} | IA={obj.HasInputAuthority} | SA={obj.HasStateAuthority}");
+        Log($"🚀 Spawn local OK : {player} | IA={obj.HasInputAuthority} | SA={obj.HasStateAuthority}");
+
         GameManager_Fusion.Instance.RegisterPlayer(player, obj);
+
+        // Lie l'objet au runner (pour TryGetPlayerObject / GetPlayerObject)
+        runner.SetPlayerObject(player, obj);
     }
 
-    // ---------------- INPUT ----------------
+    // =================================================================
+    //  INPUT
+    // =================================================================
+
     public void OnInput(NetworkRunner runner, NetworkInput input)
     {
-        PlayerInputData data = new PlayerInputData { MoveX = 0, MoveY = 0 };
+        var data = new PlayerInputData();
         if (Input.GetKey(KeyCode.A)) data.MoveX = -1;
-        if (Input.GetKey(KeyCode.D)) data.MoveX = 1;
-        if (Input.GetKey(KeyCode.W)) data.MoveY = 1;
+        if (Input.GetKey(KeyCode.D)) data.MoveX =  1;
+        if (Input.GetKey(KeyCode.W)) data.MoveY =  1;
         if (Input.GetKey(KeyCode.S)) data.MoveY = -1;
-
         input.Set(data);
     }
 
-    // ---------------- UX HELPERS ----------------
+    // =================================================================
+    //  UX HELPERS
+    // =================================================================
+
     private void SetButtons(bool enabled)
     {
-        // Tant que le runner n’est pas idle OU qu’on est en cooldown -> boutons off
-        bool allow = enabled && runner != null && !runner.IsRunning && Time.unscaledTime >= _cooldownUntilUnscaled;
-
-        if (createButton)    createButton.interactable = allow;
-        if (joinButton)      joinButton.interactable  = allow;
+        bool allow = enabled && runner != null && !runner.IsRunning
+                     && Time.unscaledTime >= _cooldownUntilUnscaled;
+        if (createButton)    createButton.interactable    = allow;
+        if (joinButton)      joinButton.interactable      = allow;
         if (quickPlayButton) quickPlayButton.interactable = allow;
     }
 
-    private void SetLoading(bool visible)
-    {
-        if (loadingOverlay) loadingOverlay.SetActive(visible);
-    }
+    private void SetLoading(bool visible) { if (loadingOverlay) loadingOverlay.SetActive(visible); }
 
     private void ResetUiState()
     {
-        if (_awaitingMigrationWindow && Time.unscaledTime < _awaitingMigrationDeadline)
-        {
-            Log("⏸ UI reset ignoré (fenêtre de migration active).");
-            return;
-        }
-
         SetLoading(false);
         SetButtons(true);
         if (menuRoot) menuRoot.SetActive(true);
         isStarting = false;
-        _hostMigrationInProgress = false;
-        _awaitingMigrationWindow = false;
-
-        // S'assure que l'input reste vide
         if (roomNameInput) roomNameInput.text = string.Empty;
     }
 
     private void Log(string msg) { if (logVerbose) Debug.Log(msg); }
 
-    // ---------------- SCENE / CONNECTION CALLBACKS ----------------
-    public void OnSceneLoadStart(NetworkRunner runner)
-    {
-        Log("🎬 SceneLoadStart");
-        SetLoading(true);
-        SetButtons(false);
-    }
+    // =================================================================
+    //  CALLBACKS RÉSEAU
+    // =================================================================
 
-    public void OnSceneLoadDone(NetworkRunner runner)
-    {
-        Log("🎉 SceneLoadDone");
-    }
+    public void OnSceneLoadStart(NetworkRunner runner) { Log("🎬 SceneLoadStart"); SetLoading(true); SetButtons(false); }
+    public void OnSceneLoadDone(NetworkRunner runner)  { Log("🎉 SceneLoadDone"); }
+    public void OnSceneLoadFailed(NetworkRunner runner) { Debug.LogWarning("⚠️ SceneLoadFailed"); ResetUiState(); }
 
     public void OnShutdown(NetworkRunner runner, ShutdownReason shutdownReason)
     {
         Debug.Log($"🔚 OnShutdown : {shutdownReason}");
-
-        // Active un petit cooldown pour éviter les doubles StartGame/Shutdown
         _cooldownUntilUnscaled = Time.unscaledTime + shutdownCooldownSeconds;
-
-        if (_awaitingMigrationWindow && Time.unscaledTime < _awaitingMigrationDeadline)
-        {
-            Log("⏭ OnShutdown ignoré (fenêtre de migration).");
-            return;
-        }
-
         ResetUiState();
+    }
+
+    public void OnPlayerLeft(NetworkRunner runner, PlayerRef player)
+    {
+        Log($"👋 OnPlayerLeft : {player}");
+        // En Shared la partie continue — on nettoie juste le registre local
+        if (GameManager_Fusion.Instance != null)
+            GameManager_Fusion.Instance.HandleDespawn(player);
     }
 
     public void OnConnectFailed(NetworkRunner runner, NetAddress remoteAddress, NetConnectFailedReason reason)
     {
-        Debug.LogError($"🟥 OnConnectFailed: {reason} @ {remoteAddress}");
+        Debug.LogError($"🟥 OnConnectFailed: {reason}");
         ResetUiState();
     }
 
     public void OnDisconnectedFromServer(NetworkRunner runner, NetDisconnectReason reason)
     {
         Debug.LogWarning($"⚠️ OnDisconnectedFromServer: {reason}");
-
-        if (_awaitingMigrationWindow && Time.unscaledTime < _awaitingMigrationDeadline)
-        {
-            Log($"⏭ Déconnexion tolérée pendant migration ({reason}).");
-            return;
-        }
-
         ResetUiState();
     }
 
-    public void OnSceneLoadFailed(NetworkRunner runner)
-    {
-        Debug.LogWarning("⚠️ SceneLoadFailed");
-        ResetUiState();
-    }
-
-    // ---------------- HOST MIGRATION / PLAYER LEFT ----------------
-    public void OnPlayerLeft(NetworkRunner runner, PlayerRef player)
-    {
-        Log($"👋 OnPlayerLeft : {player}");
-
-        if (runner.IsServer)
-            StartCoroutine(CoMaybeShutdownIfEmptyAfterDelay(runner, 5f));
-    }
-
-    private IEnumerator CoMaybeShutdownIfEmptyAfterDelay(NetworkRunner r, float delay)
-    {
-        yield return new WaitForSecondsRealtime(delay);
-
-        if (r != null && r.IsServer)
-        {
-            int count = 0;
-            foreach (var p in r.ActivePlayers) count++;
-
-            if (count == 0)
-            {
-                Log("🛑 Room vide après délai -> Shutdown serveur.");
-                r.Shutdown();
-            }
-            else
-            {
-                Log($"✅ Room toujours active après délai ({count} joueurs), pas de shutdown.");
-            }
-        }
-    }
-
-    public void OnHostMigration(NetworkRunner runner, HostMigrationToken token)
-    {
-        if (_hostMigrationInProgress)
-            return;
-
-        _hostMigrationInProgress = true;
-
-        _awaitingMigrationWindow   = true;
-        _awaitingMigrationDeadline = Time.unscaledTime + 8f;
-
-        ushort raw = (ushort)runner.LocalPlayer.RawEncoded;
-        float delayMs = 200f + (raw % 501);
-        Log($"🧭 HostMigration détectée -> tentative dans {delayMs:0} ms (id={raw}).");
-
-        StartCoroutine(CoTryBecomeHostAfterDelay(delayMs / 1000f, token));
-    }
-
-    private IEnumerator CoTryBecomeHostAfterDelay(float delay, HostMigrationToken token)
-    {
-        yield return new WaitForSecondsRealtime(delay);
-
-        Action<NetworkRunner> onResume = (newRunner) =>
-        {
-            Log("🔁 HostMigrationResume: reprise de l'état...");
-
-            if (forceSafeRespawnAfterMigration)
-                StartCoroutine(CoSafeRespawnAfterMigration(newRunner));
-
-            _awaitingMigrationWindow = false;
-        };
-
-        _ = StartGameSafe(GameMode.Host, token, onResume);
-    }
-
-    private IEnumerator CoSafeRespawnAfterMigration(NetworkRunner newRunner)
-    {
-        float timeout = 6f;
-        while (GameManager_Fusion.Instance == null && timeout > 0f)
-        {
-            timeout -= Time.unscaledDeltaTime;
-            yield return null;
-        }
-
-        if (GameManager_Fusion.Instance == null)
-        {
-            Debug.LogWarning("⚠️ Pas de GameManager_Fusion après migration, respawn ignoré.");
-            yield break;
-        }
-
-        foreach (var p in newRunner.ActivePlayers)
-        {
-            if (!newRunner.TryGetPlayerObject(p, out NetworkObject existing) || existing == null)
-            {
-                Vector3 pos = GameManager_Fusion.Instance.GetSpawnPosition();
-                var obj = newRunner.Spawn(playerPrefab, pos, Quaternion.identity, p);
-                GameManager_Fusion.Instance.RegisterPlayer(p, obj);
-                Log($"🔄 Respawn post-migration pour {p} | IA={obj.HasInputAuthority} | SA={obj.HasStateAuthority}");
-            }
-        }
-    }
-
-    // ---------------- STUBS / MISC ----------------
-    public void OnConnectedToServer(NetworkRunner runner) { }
-    public void OnConnectRequest(NetworkRunner runner, NetworkRunnerCallbackArgs.ConnectRequest request, byte[] token) => request.Accept();
-    public void OnUserSimulationMessage(NetworkRunner runner, SimulationMessagePtr message) { }
     public void OnSessionListUpdated(NetworkRunner runner, List<SessionInfo> sessionList)
     {
-        // Met à jour le cache des noms connus pour garantir l’unicité
         _knownSessionNames.Clear();
         foreach (var s in sessionList)
-        {
-            if (!string.IsNullOrEmpty(s.Name))
-                _knownSessionNames.Add(s.Name);
-        }
-
+            if (!string.IsNullOrEmpty(s.Name)) _knownSessionNames.Add(s.Name);
         OnSessionsUpdated?.Invoke(sessionList);
         if (logVerbose) Debug.Log($"🗂 Sessions: {sessionList.Count}");
     }
+
+    // =================================================================
+    //  API PUBLIQUE
+    // =================================================================
+
+    /// <summary>Retour menu propre : shutdown Shared + load scène 0.</summary>
+    public async void SafeReturnToMenu()
+    {
+        await startLock.WaitAsync();
+        try
+        {
+            Log("↩ SafeReturnToMenu");
+            if (runner == null) EnsureRunner();
+            if (runner != null && runner.IsRunning)
+                await ShutdownRunnerWithTimeout(runnerShutdownTimeoutMs);
+
+            _cooldownUntilUnscaled = Time.unscaledTime + shutdownCooldownSeconds;
+
+            if (runner != null)
+            {
+                try { Destroy(runner.gameObject); } catch { }
+                runner = null;
+            }
+
+            while (Time.unscaledTime < _cooldownUntilUnscaled) await Task.Yield();
+            SceneManager.LoadScene(0);
+        }
+        finally { startLock.Release(); }
+    }
+
+    // =================================================================
+    //  STUBS INetworkRunnerCallbacks
+    // =================================================================
+
+    public void OnConnectedToServer(NetworkRunner runner) { }
+    public void OnConnectRequest(NetworkRunner runner, NetworkRunnerCallbackArgs.ConnectRequest request, byte[] token) => request.Accept();
+    public void OnUserSimulationMessage(NetworkRunner runner, SimulationMessagePtr message) { }
     public void OnCustomAuthenticationResponse(NetworkRunner runner, Dictionary<string, object> data) { }
     public void OnReliableDataReceived(NetworkRunner runner, PlayerRef player, ReliableKey key, ArraySegment<byte> data) { }
     public void OnReliableDataProgress(NetworkRunner runner, PlayerRef player, ReliableKey key, float progress) { }
@@ -641,45 +492,6 @@ public class FusionMultiplayerManager : MonoBehaviour, INetworkRunnerCallbacks
     public void OnObjectExitAOI(NetworkRunner runner, NetworkObject obj, PlayerRef player) { }
     public void OnInputMissing(NetworkRunner runner, PlayerRef player, NetworkInput input) { }
 
-    // ---------------- API utilitaire ----------------
-    /// <summary>
-    /// Retour menu FIABLE : force un vrai shutdown (avec délai), détruit le runner si besoin, puis charge le menu.
-    /// </summary>
-    public async void SafeReturnToMenu()
-    {
-        await startLock.WaitAsync();
-        try
-        {
-            Log("↩ SafeReturnToMenu: shutdown runner si actif puis load menu.");
-
-            if (runner == null)
-                EnsureRunner();
-
-            if (runner != null && runner.IsRunning)
-            {
-                await ShutdownRunnerWithTimeout(runnerShutdownTimeoutMs);
-            }
-
-            // Cooldown léger pour éviter les races (load scene pendant destruction réseau)
-            _cooldownUntilUnscaled = Time.unscaledTime + shutdownCooldownSeconds;
-
-            // Si le Runner traîne encore, on détruit le GameObject pour repartir PROPRE
-            if (runner != null)
-            {
-                try { Destroy(runner.gameObject); } catch { }
-                runner = null;
-            }
-
-            // Attend la fin du cooldown -> état propre garanti
-            while (Time.unscaledTime < _cooldownUntilUnscaled)
-                await Task.Yield();
-
-            // Retour au menu
-            SceneManager.LoadScene(0);
-        }
-        finally
-        {
-            startLock.Release();
-        }
-    }
+    // Pas de host migration en Shared → stub vide
+    public void OnHostMigration(NetworkRunner runner, HostMigrationToken token) { }
 }

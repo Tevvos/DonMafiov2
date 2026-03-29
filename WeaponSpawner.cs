@@ -3,7 +3,13 @@ using Fusion;
 using System.Collections;
 using System.Collections.Generic;
 
-public class WeaponSpawner : MonoBehaviour
+/// <summary>
+/// WeaponSpawner — GameMode.Shared
+/// Hérite de NetworkBehaviour pour avoir Object.HasStateAuthority.
+/// En Shared il n'y a pas de runner.IsServer global :
+/// l'objet scène reçoit une StateAuthority automatique.
+/// </summary>
+public class WeaponSpawner : NetworkBehaviour
 {
     [System.Serializable]
     public class WeaponEntry
@@ -12,63 +18,74 @@ public class WeaponSpawner : MonoBehaviour
         [Range(0, 100)] public float spawnChance = 50f;
     }
 
-    [Header("📦 Armes avec taux de probabilité (%)")]
+    [Header("Armes avec taux de probabilité (%)")]
     [SerializeField] private List<WeaponEntry> weaponPrefabs = new();
 
-    [Header("📍 Points de spawn (assignés dans la scène)")]
+    [Header("Points de spawn")]
     [SerializeField] private Transform[] spawnPoints;
 
-    [Header("⚙️ Options")]
+    [Header("Options")]
     [SerializeField] private bool spawnOnStart = true;
 
-    private NetworkRunner runner;
     private readonly List<NetworkObject> _spawned = new();
 
-    private IEnumerator Start()
+    // ──────────────────────────────────────────────────────────────────
+    //  Fusion hook
+    // ──────────────────────────────────────────────────────────────────
+
+    public override void Spawned()
     {
-        runner = FindObjectOfType<NetworkRunner>();
-        while (runner == null || !runner.IsRunning || !runner.IsServer)
-            yield return null;
+        // ✅ Shared : Object.HasStateAuthority
+        if (!Object.HasStateAuthority) return;
 
         if (spawnOnStart)
-        {
-            yield return new WaitForSeconds(1f);
-            RespawnAll();
-        }
+            StartCoroutine(CoDelayedSpawnAll());
     }
 
-    // ------ API publique ------
+    private IEnumerator CoDelayedSpawnAll()
+    {
+        yield return new WaitForSeconds(1f);
+        RespawnAll();
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    //  API publique
+    // ──────────────────────────────────────────────────────────────────
+
     public void RespawnAll()
     {
-        if (runner == null || !runner.IsServer) return;
+        // ✅ Shared : Object.HasStateAuthority
+        if (!Object.HasStateAuthority) return;
         ClearSpawned();
         SpawnWeapons();
     }
 
     public void ClearSpawned()
-{
-    if (runner == null || !runner.IsServer) return;
-
-    for (int i = _spawned.Count - 1; i >= 0; i--)
     {
-        var no = _spawned[i];
-        if (no)
+        // ✅ Shared : Object.HasStateAuthority
+        if (!Object.HasStateAuthority) return;
+
+        for (int i = _spawned.Count - 1; i >= 0; i--)
         {
-            // Fusion 2 : plus de IsSpawned → on teste si l'objet est attaché à un Runner
-            if (no.Runner != null) runner.Despawn(no);
-            else Destroy(no.gameObject);
+            var no = _spawned[i];
+            if (no)
+            {
+                if (no.Runner != null) Runner.Despawn(no);
+                else Destroy(no.gameObject);
+            }
         }
+        _spawned.Clear();
     }
-    _spawned.Clear();
-}
 
+    // ──────────────────────────────────────────────────────────────────
+    //  Interne
+    // ──────────────────────────────────────────────────────────────────
 
-    // ------ interne ------
     private void SpawnWeapons()
     {
         if (spawnPoints == null || spawnPoints.Length == 0 || weaponPrefabs.Count == 0)
         {
-            Debug.LogWarning("⚠️ Aucun spawn point ou prefab assigné.");
+            Debug.LogWarning("⚠️ WeaponSpawner: aucun spawn point ou prefab assigné.");
             return;
         }
 
@@ -79,35 +96,27 @@ public class WeaponSpawner : MonoBehaviour
             NetworkPrefabRef selected = GetRandomWeapon();
             if (!selected.IsValid) continue;
 
-            var no = runner.Spawn(
-                selected,
-                point.position,
-                Quaternion.identity,
-                inputAuthority: null
-            );
-
+            var no = Runner.Spawn(selected, point.position, Quaternion.identity, inputAuthority: null);
             if (no) _spawned.Add(no);
-            Debug.Log($"📦 Arme instanciée à {point.name}");
+
+            Debug.Log($"📦 WeaponSpawner: arme spawnée à {point.name}");
         }
 
-        Debug.Log($"✅ {_spawned.Count} armes spawnées.");
+        Debug.Log($"✅ WeaponSpawner: {_spawned.Count} armes spawnées.");
     }
 
     private NetworkPrefabRef GetRandomWeapon()
     {
-        float totalWeight = 0f;
-        foreach (var entry in weaponPrefabs) totalWeight += entry.spawnChance;
+        float total = 0f;
+        foreach (var e in weaponPrefabs) total += e.spawnChance;
 
-        float rand = Random.Range(0f, totalWeight);
-        float cumulative = 0f;
-
-        foreach (var entry in weaponPrefabs)
+        float rand = Random.Range(0f, total);
+        float cumul = 0f;
+        foreach (var e in weaponPrefabs)
         {
-            cumulative += entry.spawnChance;
-            if (rand <= cumulative)
-                return entry.prefab;
+            cumul += e.spawnChance;
+            if (rand <= cumul) return e.prefab;
         }
-
         return weaponPrefabs[0].prefab;
     }
 }
